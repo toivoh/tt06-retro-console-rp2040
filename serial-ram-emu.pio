@@ -1,0 +1,141 @@
+
+.define PUBLIC TT_CLOCK_PIN 0
+
+.define PUBLIC NUM_SERIAL_CYCLES 4
+.define PUBLIC NUM_SERIAL_PINS 4
+
+.define PUBLIC DATA_ADDRESS_SYNC_IRQ 4
+
+
+// Read in address bits
+// ====================
+// Start after fpga_clock program.
+// Uses autopush.
+// JMP pin should be addr0.
+.program address_in
+	// Read top address bits into X from TX FIFO
+	pull
+	mov x, osr
+
+	wait 1 gpio TT_CLOCK_PIN // Synchronize with FPGA clock
+	nop // needed to sync up FPGA clock?
+	// 2-cycle looop to wait for a high addr0 to start the first transaction.
+wait_synced:
+		jmp pin synced // falling edge
+	jmp wait_synced
+synced:
+
+	//nop // rising edge
+	nop [2] // rising edge
+.wrap_target
+	in pins, 4 [1] // falling edge
+	in pins, 4 [1] // falling edge
+	in pins, 4 [1] // falling edge
+	in pins, 4     // falling edge
+	in x, 15 // Fill the top address bits, autopush
+.wrap
+
+% c-sdk {
+static inline void address_in_program_init(PIO pio, uint sm, uint offset, uint pin, uint jmp_pin) {
+	pio_sm_config c = address_in_program_get_default_config(offset);
+
+	sm_config_set_in_shift(&c, true, true, 31); // shift right, autopush
+
+	sm_config_set_in_pins(&c, pin);
+	pio_sm_set_consecutive_pindirs(pio, sm, pin, NUM_SERIAL_PINS, false);
+	sm_config_set_jmp_pin(&c, jmp_pin);
+
+	pio_sm_init(pio, sm, offset, &c); // Load our configuration, and jump to the start of the program
+	pio_sm_set_enabled(pio, sm, true); // Set the state machine running
+}
+%}
+
+
+// Write out data bits
+// ===================
+// Waits for first data to arrive in TX FIFO, then waits a configurable number of cycles before starting to send out data.
+// Uses autopull.
+.program data_out
+	// Read in wait timer from TX FIFO
+	pull
+	mov y, osr
+
+	// Wait for address_in program to start
+	//wait 1 irq DATA_ADDRESS_SYNC_IRQ
+	// Wait for first data to come into TX FIFO
+	pull
+	// Additional delay before starting the output
+wait_loop:
+	jmp y--, wait_loop
+
+	// Output loop
+.wrap_target
+	out pins, NUM_SERIAL_PINS [1] // autopull
+.wrap
+
+% c-sdk {
+static inline void data_out_program_init(PIO pio, uint sm, uint offset, uint pin) {
+	pio_sm_config c = data_out_program_get_default_config(offset);
+
+	sm_config_set_out_shift(&c, true, true, NUM_SERIAL_CYCLES*NUM_SERIAL_PINS); // shift right, autopull
+
+	sm_config_set_out_pins(&c, pin, NUM_SERIAL_PINS);
+	sm_config_set_set_pins(&c, pin, NUM_SERIAL_PINS);
+	for (int i = 0; i < NUM_SERIAL_PINS; i++) pio_gpio_init(pio, pin + i);
+	pio_sm_set_consecutive_pindirs(pio, sm, pin, NUM_SERIAL_PINS, true);
+
+	pio_sm_init(pio, sm, offset, &c); // Load our configuration, and jump to the start of the program
+	pio_sm_set_enabled(pio, sm, true); // Set the state machine running
+}
+%}
+
+
+// Write out data bits, echo to RX FIFO
+// ====================================
+// Waits for first data to arrive in TX FIFO, then waits a configurable number of cycles before starting to send out data.
+// Uses autopull.
+.program data_out_echo
+	// Read in wait timer from TX FIFO
+	// TODO: put back
+	//set y, (2*2)
+	set y, (1*2)
+	//pull
+	//mov y, osr
+
+	// Wait for first data to come into TX FIFO
+	pull
+	in osr, 32 // echo to RX FIFO (autopush)
+	// Additional delay before starting the output
+wait_loop:
+	jmp y--, wait_loop
+
+	// Output loop
+	// OSR full
+	out pins, NUM_SERIAL_PINS [1]
+.wrap_target
+	out pins, NUM_SERIAL_PINS [1]
+	out pins, NUM_SERIAL_PINS [1]
+	out pins, NUM_SERIAL_PINS // autopull
+	//in osr, 32 // echo to RX FIFO (autopush)
+	mov isr, osr // copy osr after autopull
+	out pins, NUM_SERIAL_PINS
+	push noblock // echo 
+	//push // echo, should be noblock, but currently giving trouble...
+.wrap
+
+% c-sdk {
+static inline void data_out_echo_program_init(PIO pio, uint sm, uint offset, uint pin) {
+	pio_sm_config c = data_out_echo_program_get_default_config(offset);
+
+	sm_config_set_out_shift(&c, true, true, NUM_SERIAL_CYCLES*NUM_SERIAL_PINS); // shift right, autopull
+	sm_config_set_in_shift( &c, true, true, 32); // shift right (doesn't matter), autopush
+
+	sm_config_set_out_pins(&c, pin, NUM_SERIAL_PINS);
+	sm_config_set_set_pins(&c, pin, NUM_SERIAL_PINS);
+	for (int i = 0; i < NUM_SERIAL_PINS; i++) pio_gpio_init(pio, pin + i);
+	pio_sm_set_consecutive_pindirs(pio, sm, pin, NUM_SERIAL_PINS, true);
+
+	pio_sm_init(pio, sm, offset, &c); // Load our configuration, and jump to the start of the program
+	pio_sm_set_enabled(pio, sm, true); // Set the state machine running
+}
+%}
